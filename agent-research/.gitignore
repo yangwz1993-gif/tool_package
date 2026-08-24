@@ -1,0 +1,8 @@
+node_modules/
+.venv/
+*.cookie
+cookie-profile-*/
+work/
+agent-*/
+results/
+.auth.json

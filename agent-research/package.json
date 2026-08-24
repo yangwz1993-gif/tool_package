@@ -1,0 +1,11 @@
+{
+  "name": "agent-research-skill",
+  "version": "0.1.0",
+  "description": "多agent并行调研+出题编排 skill",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.0",
+    "playwright": "^1.40.0"
+  }
+}
