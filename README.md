@@ -6,7 +6,7 @@
 
 | Skill | 说明 | 状态 | 依赖 |
 |-------|------|------|------|
-| [agent-research](agent-research/) | 多 agent 并行调研编排器：跨平台（微博/小红书/知乎/公众号）检索内容 → 子 agent 并行生成结构化题目/结果 → supervisor 守护 + 预算控制（DS v4，90% 停止线）→ 质量校验 → 输出表格 | ✅ 可用 | playwright、DS API key、平台 cookie |
+| [kol-questions](kol-questions/) | KOL 内容调研与测试题生成：跨平台（微博/小红书/知乎/公众号）检索 KOL/博主内容 → 子 agent 并行生成可执行测试题 → supervisor 守护 + 预算控制（DS v4，90% 停止线）→ 质量校验 → 输出 Excel | ✅ 可用 | playwright、DS API key、平台 cookie |
 
 ## 快速接入 pi
 
@@ -14,9 +14,9 @@
 
 ```bash
 # 全局（所有项目可用）
-ln -s "$(pwd)/agent-research" ~/.pi/agent/skills/agent-research
+ln -s "$(pwd)/kol-questions" ~/.pi/agent/skills/kol-questions
 # 或项目级
-mkdir -p <项目>/.pi/skills && ln -s "$(pwd)/agent-research" <项目>/.pi/skills/agent-research
+mkdir -p <项目>/.pi/skills && ln -s "$(pwd)/kol-questions" <项目>/.pi/skills/kol-questions
 ```
 
 pi 会在需要时按 `SKILL.md` 的 `description` 自动加载对应 skill。
@@ -37,4 +37,4 @@ pi 会在需要时按 `SKILL.md` 的 `description` 自动加载对应 skill。
 
 ## 历史
 
-- 2026-08-25：仓库初始化，加入 `agent-research`（首个 skill）。
+- 2026-08-25：仓库初始化，加入 `kol-questions`（首个 skill，KOL 测试题调研）。

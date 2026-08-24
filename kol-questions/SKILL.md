@@ -1,6 +1,6 @@
 ---
-name: agent-research
-description: 多 agent 并行调研 + 出题编排器。用户给调研目标（如"找出N条agent/vibecoding测试题"），自动切分子任务、并行子agent检索（微博/小红书/知乎/公众号）、每子agent多步ReAct检索并生成可执行测试题（含task/难度/验收标准）、汇总检查、不达标自动迭代新检索策略，最后输出汇总表格。适合任何"跨平台找内容并加工成结构化结果"的任务。
+name: kol-questions
+description: KOL 内容调研与测试题生成。用户给调研目标（如"找出N条KOL/博主发布的agent/vibecoding测试题"），自动切分子任务、并行子agent检索（微博/小红书/知乎/公众号）、每子agent多步ReAct检索并生成可执行测试题（含task/难度/验收标准）、汇总检查、不达标自动迭代新检索策略，最后输出汇总表格（Excel）。带预算控制与质量校验。适合"跨平台找KOL内容并加工成结构化测试题/题目"的任务。
 ---
 
 # Agent Research 多代理调研编排
@@ -32,7 +32,7 @@ description: 多 agent 并行调研 + 出题编排器。用户给调研目标（
 
 ```bash
 # 1. 安装依赖（首次）
-cd agent-research-skill
+cd kol-questions
 npm install playwright
 npx playwright install chromium
 
