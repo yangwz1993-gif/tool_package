@@ -45,6 +45,10 @@ node scripts/cookie_persist.mjs zhihu.com zhihu.cookie     # 知乎
 node orchestrator.mjs "找出10条agent/vibecoding build类测试题" --target 10 --budget 3
 ```
 
+## 示例产物
+
+`examples/` 目录下有真实的运行样例（50 条 KOL 测试题 Excel，含 task/难度/验收标准/来源/博主/链接），可参考了解输出格式。
+
 ## 预算控制（重要）
 
 - **模型**：文本用 `deepseek-v4-flash`，图片 OCR 用 `deepseek-v4-flash-vision-exp`（DS 官网文档确认，图片按尺寸计费，每张 ≤384 tokens）。
