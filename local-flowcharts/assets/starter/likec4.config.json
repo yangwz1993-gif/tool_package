@@ -1,0 +1,6 @@
+{
+  "$schema": "https://likec4.dev/schemas/config.json",
+  "name": "local-workflow",
+  "title": "流程图",
+  "landingPage": {"redirect": true}
+}

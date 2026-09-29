@@ -1,0 +1,32 @@
+specification {
+  element step { style { color primary; size sm } }
+  element decision { style { color amber; size sm } }
+  element milestone { style { color green; size sm } }
+  relationship flow { line solid; color gray; multiple true }
+  relationship retry { line dashed; color red; multiple true }
+}
+model {
+  draft = step '填写申请' {
+    description '''申请人填写资料并提交审核。'''
+    metadata { phase '申请' }
+  }
+  review = decision '审批通过？' {
+    description '''资料齐全且符合规则时通过，否则退回补充。'''
+    metadata { phase '审批' }
+  }
+  done = milestone '完成' {
+    description '''记录审批结论并通知申请人。'''
+    metadata { phase '完成' }
+  }
+  draft -[flow]-> review '提交'
+  review -[retry]-> draft '退回'
+  review -[flow]-> done '通过'
+}
+views {
+  view index {
+    title '完整申请流程'
+    include *
+    style * { size xs; textSize lg; padding xs }
+    autoLayout LeftRight 24 16
+  }
+}

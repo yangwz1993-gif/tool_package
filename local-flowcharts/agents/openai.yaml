@@ -1,0 +1,6 @@
+interface:
+  display_name: "本地交互流程图"
+  short_description: "用自然语言生成和修改完整流程图，交付可点开详情的单文件 HTML"
+  default_prompt: "用 $local-flowcharts 把我的流程整理成完整的交互图，并验证内容、布局和导出。"
+policy:
+  allow_implicit_invocation: true

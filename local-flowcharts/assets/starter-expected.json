@@ -1,0 +1,6 @@
+{
+  "default_view": "index",
+  "elements": ["draft", "review", "done"],
+  "visible_nodes": ["draft", "review", "done"],
+  "relations": [["draft", "review", "提交"], ["review", "draft", "退回"], ["review", "done", "通过"]]
+}
