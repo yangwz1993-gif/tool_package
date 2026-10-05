@@ -1,0 +1,275 @@
+{
+  "project": "Agent判分流水线（DAG版）",
+  "goal": {
+    "one_liner": "搭一条多路并行的判分 Agent 流水线：两路数据并行拉取、自动判分、质检不合格自动回流重判，T+1 出全量报告。",
+    "metrics": [
+      {
+        "name": "覆盖率",
+        "target": "100%",
+        "how": "10 万条对话全部出分，漏判数 = 0"
+      },
+      {
+        "name": "总耗时",
+        "target": "≤ 2 小时",
+        "how": "两路数据并行拉取，对比串行基线 4 小时"
+      },
+      {
+        "name": "质检一次通过率",
+        "target": "≥ 95%",
+        "how": "机器质检一轮通过的比例，剩余回流重判"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "N1",
+      "name": "解析需求配置",
+      "stage": "初始化",
+      "complexity": "low",
+      "func": "读入 YAML 配置 → 校验字段 → 生成运行参数",
+      "risk": "配置写错 → 启动前先 dry-run 打印参数人工确认",
+      "code": "scripts/parse_config.py",
+      "type": "start"
+    },
+    {
+      "id": "N2a",
+      "name": "拉取对话数据",
+      "stage": "数据接入",
+      "complexity": "mid",
+      "func": "从数仓分页拉 10 万条客服对话",
+      "risk": "接口超时 → 分页拉取 + 断点续传",
+      "code": "scripts/fetch_dialogs.py",
+      "type": "io"
+    },
+    {
+      "id": "N2b",
+      "name": "拉取知识库",
+      "stage": "数据接入",
+      "complexity": "mid",
+      "func": "拉取判分标准和 SOP 文档，锁定版本号",
+      "risk": "文档版本不对 → 拉取时记录版本号，报告里可追溯",
+      "code": "scripts/fetch_kb.py",
+      "type": "io"
+    },
+    {
+      "id": "N3",
+      "name": "清洗与合并",
+      "stage": "数据处理",
+      "complexity": "mid",
+      "func": "两路数据按会话 ID 合并 → 去重 → 脱敏",
+      "risk": "合并键缺失 → 缺失样本单独导出，不阻塞主流程",
+      "code": "scripts/clean_merge.py"
+    },
+    {
+      "id": "N4",
+      "name": "小样本验证",
+      "stage": "数据处理",
+      "complexity": "mid",
+      "func": "抽 200 条试跑，人工确认 prompt 效果",
+      "risk": "不达标 → 调 prompt 重新试跑，绝不直接进全量",
+      "code": [
+        "judge/run_batch.py",
+        "judge/prompt_v3.md"
+      ]
+    },
+    {
+      "id": "N5",
+      "name": "全量判分",
+      "stage": "批量执行",
+      "complexity": "high",
+      "func": "10 万条并发送判分模型，限流 + 重试 + 断点续跑",
+      "risk": "限流或费用爆炸 → 并发上限 + 预算熔断",
+      "note": [
+        "↩ 单条失败自动重试3次"
+      ],
+      "code": [
+        "judge/run_batch.py::run_all()",
+        "judge/ratelimit.py"
+      ],
+      "type": "subprocess"
+    },
+    {
+      "id": "N6",
+      "name": "机器质检",
+      "stage": "质量把关",
+      "complexity": "high",
+      "func": "规则 + 模型双检：分数异常、格式错误、漏字段",
+      "risk": "误杀合格样本 → 保留人工复核通道",
+      "code": "qc/machine_check.py",
+      "type": "decision"
+    },
+    {
+      "id": "N7",
+      "name": "不合格回流重判",
+      "stage": "质量把关",
+      "complexity": "high",
+      "func": "不合格样本调整 prompt 后送回全量判分",
+      "risk": "死循环 → 最多回流 2 次，超出转人工处理",
+      "note": [
+        "↩ 最多回流2次"
+      ],
+      "code": [
+        "qc/reflow.py",
+        "judge/prompt_v3.md"
+      ],
+      "type": "loop"
+    },
+    {
+      "id": "N8",
+      "name": "汇总出报告",
+      "stage": "产出交付",
+      "complexity": "low",
+      "func": "分数分布 + 失败清单 + xlsx/HTML 报告（带时间戳）",
+      "risk": "无",
+      "code": "report/build_report.py",
+      "type": "end"
+    }
+  ],
+  "edges": [
+    [
+      "N1",
+      "N2a"
+    ],
+    [
+      "N1",
+      "N2b"
+    ],
+    [
+      "N2a",
+      "N3"
+    ],
+    [
+      "N2b",
+      "N3"
+    ],
+    [
+      "N3",
+      "N4"
+    ],
+    [
+      "N4",
+      "N5"
+    ],
+    [
+      "N5",
+      "N6"
+    ],
+    {
+      "from": "N6",
+      "to": "N8",
+      "label": "合格"
+    },
+    {
+      "from": "N6",
+      "to": "N7",
+      "label": "不合格"
+    },
+    {
+      "from": "N7",
+      "to": "N5",
+      "label": "回流重判"
+    }
+  ],
+  "todos": [
+    {
+      "id": "T1",
+      "priority": "P0",
+      "what": "实现 parse_config.py 并 dry-run 校验",
+      "why": "配置错会让整条流水线白跑两小时",
+      "verify": "打印参数与需求逐条一致",
+      "complexity": "low",
+      "risk": "无",
+      "deps": "无"
+    },
+    {
+      "id": "T2a",
+      "priority": "P0",
+      "what": "实现对话数据拉取（分页+断点续传）",
+      "why": "10 万条一次拉不完，接口超时必现",
+      "verify": "拉到 10 万行；杀掉进程后续传不重拉",
+      "complexity": "mid",
+      "risk": "限流 → 分页+退避",
+      "deps": "T1（可与 T2b 并行）"
+    },
+    {
+      "id": "T2b",
+      "priority": "P0",
+      "what": "实现知识库拉取并锁版本号",
+      "why": "判分标准必须可追溯，版本错分数全废",
+      "verify": "版本号 = 约定版本并写入报告",
+      "complexity": "mid",
+      "risk": "无",
+      "deps": "T1（可与 T2a 并行）"
+    },
+    {
+      "id": "T3",
+      "priority": "P1",
+      "what": "清洗合并脱敏",
+      "why": "脏数据直接污染判分结果",
+      "verify": "合并成功率 ≥ 99%；抽 10 条无手机号残留",
+      "complexity": "mid",
+      "risk": "脱敏漏网 → 加规则重跑",
+      "deps": "T2a、T2b"
+    },
+    {
+      "id": "T4",
+      "priority": "P0",
+      "what": "prompt_v3 小样本 200 条验收",
+      "why": "prompt 不达标跑全量就是烧钱",
+      "verify": "人工验收明显不合理 ≤ 4 条",
+      "complexity": "mid",
+      "risk": "不达标 → 调 prompt 重跑本步",
+      "deps": "T3"
+    },
+    {
+      "id": "T5",
+      "priority": "P1",
+      "what": "全量判分（并发+预算熔断+续跑）",
+      "why": "核心交付：10 万条全部出分",
+      "verify": "成功+失败 = 10 万；API 费用在预算内",
+      "complexity": "high",
+      "risk": "限流/中断 → 熔断+断点续跑",
+      "deps": "T4"
+    },
+    {
+      "id": "T6",
+      "priority": "P1",
+      "what": "机器质检 + 不合格回流（≤2 轮）",
+      "why": "守住一次通过率 ≥ 95% 的指标",
+      "verify": "通过率达标；回流轮次 ≤ 2",
+      "complexity": "high",
+      "risk": "回流异常 → 停线查 prompt",
+      "deps": "T5"
+    },
+    {
+      "id": "T7",
+      "priority": "P2",
+      "what": "出报告 + 50 条人工复核",
+      "why": "交付物 + 质量背书",
+      "verify": "总数 = 10 万；一致率 ≥ 90%",
+      "complexity": "low",
+      "risk": "无",
+      "deps": "T6"
+    }
+  ],
+  "status": {
+    "done": [
+      "T1 配置解析与 dry-run 校验",
+      "pipeline.yaml 初稿评审通过",
+      "数仓只读账号开通",
+      "判分 prompt v1 归档",
+      "项目 kickoff 纪要"
+    ],
+    "doing": [
+      "T2a 对话拉取：分页续传开发中（约 70%）"
+    ],
+    "blocked": [
+      "T2b 知识库：等数据组确认 SOP 最新版本号"
+    ]
+  },
+  "experience": [
+    "数仓分页接口 page_size > 500 必超时，300 是稳定值",
+    "判分 prompt 不强约束输出 schema 时约 0.3% 返回无法解析，必须强制 JSON 输出"
+  ],
+  "repo_tree": "judge-pipeline/\n├── config/\n│   └── pipeline.yaml\n├── scripts/\n│   ├── parse_config.py\n│   ├── fetch_dialogs.py\n│   ├── fetch_kb.py\n│   └── clean_merge.py\n├── judge/\n│   ├── run_batch.py\n│   ├── ratelimit.py\n│   └── prompt_v3.md\n├── qc/\n│   ├── machine_check.py\n│   └── reflow.py\n└── report/\n    └── build_report.py"
+}

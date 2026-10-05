@@ -1,0 +1,85 @@
+{
+  "project": "【项目名，说人话】",
+  "goal": {
+    "one_liner": "【一句话目标：干什么、替代什么、什么时候交付】",
+    "metrics": [
+      {
+        "name": "【指标名】",
+        "target": "【目标值，能写数字就写数字】",
+        "how": "【怎么算达成】"
+      },
+      {
+        "name": "【指标名】",
+        "target": "【目标值】",
+        "how": "【怎么算达成】"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "N1",
+      "name": "【节点名称】",
+      "stage": "【阶段名】",
+      "complexity": "low",
+      "type": "io",
+      "func": "【输入什么 → 干什么 → 输出什么】",
+      "risk": "【会出什么事 + 怎么办；没有写「无」】",
+      "code": "【可选：scripts/xxx.py，可带 ::函数名】"
+    },
+    {
+      "id": "N2",
+      "name": "【节点名称】",
+      "stage": "【阶段名】",
+      "complexity": "mid",
+      "type": "process",
+      "func": "【输入什么 → 干什么 → 输出什么】",
+      "risk": "【风险 + 应对】"
+    },
+    {
+      "id": "N3",
+      "name": "【节点名称】",
+      "stage": "【阶段名】",
+      "complexity": "high",
+      "type": "process",
+      "func": "【输入什么 → 干什么 → 输出什么】",
+      "risk": "【风险 + 应对】",
+      "note": [
+        "【可选：框内附加说明，如 ↩ 失败重试3次】"
+      ]
+    }
+  ],
+  "edges": [
+    ["N1", "N2"],
+    ["N2", "N3"]
+  ],
+  "todos": [
+    {
+      "id": "T1",
+      "priority": "P0",
+      "what": "【做什么：当前待办的一件事】",
+      "why": "【为什么做：不做会怎样 / 支撑哪个指标】",
+      "verify": "【怎么确认成了：命令输出 / 文件存在 / 数字达标】",
+      "complexity": "low",
+      "risk": "【出问题会怎样】",
+      "deps": "无"
+    },
+    {
+      "id": "T2",
+      "priority": "P1",
+      "what": "【做什么】",
+      "why": "【为什么做】",
+      "verify": "【验证方法】",
+      "complexity": "mid",
+      "risk": "【出问题会怎样】",
+      "deps": "T1"
+    }
+  ],
+  "status": {
+    "doing": [],
+    "blocked": [],
+    "done": [],
+    "aborted": []
+  },
+  "experience": [],
+  "repo_tree": ""
+}

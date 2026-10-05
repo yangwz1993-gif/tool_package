@@ -1,0 +1,140 @@
+{
+  "project": "批量判分CSV",
+  "goal": {
+    "one_liner": "把 3000 条客服对话自动判分并汇总成报告，替代人工抽检，今天下班前交付。",
+    "metrics": [
+      {
+        "name": "覆盖率",
+        "target": "100%",
+        "how": "3000 条全部出分，漏判数 = 0"
+      },
+      {
+        "name": "总耗时",
+        "target": "≤ 30 分钟",
+        "how": "脚本单次全量运行"
+      },
+      {
+        "name": "抽检一致率",
+        "target": "≥ 90%",
+        "how": "随机抽 50 条人工复核，机器分与人分一致的比例"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "N1",
+      "name": "读取原始CSV",
+      "stage": "数据准备",
+      "complexity": "low",
+      "type": "io",
+      "func": "读入对话表 → 校验列名行数 → 内存中的数据表",
+      "risk": "列名不匹配 → 先打印表头人工确认",
+      "code": "scripts/check_csv.py"
+    },
+    {
+      "id": "N2",
+      "name": "小样本试跑20条",
+      "stage": "数据准备",
+      "complexity": "mid",
+      "func": "取前 20 条 → 送判分 → 人工看结果",
+      "risk": "prompt 效果差 → 调 prompt 再试，不急着全量",
+      "code": [
+        "judge/run_batch.py",
+        "judge/prompt_v2.md"
+      ]
+    },
+    {
+      "id": "N3",
+      "name": "全量判分",
+      "stage": "批量执行",
+      "complexity": "high",
+      "type": "loop",
+      "func": "3000 条逐条送模型 → 写中间结果，失败重试 3 次",
+      "risk": "限流/中断 → 加并发控制 + 断点续跑",
+      "note": [
+        "↩ 失败重试3次，仍失败",
+        "记入失败清单"
+      ],
+      "code": "judge/run_batch.py::run_all()"
+    },
+    {
+      "id": "N4",
+      "name": "汇总导出xlsx",
+      "stage": "产出交付",
+      "complexity": "low",
+      "type": "io",
+      "func": "合并结果 → 写 xlsx（文件名带时间戳）",
+      "risk": "覆盖旧文件 → 命名强制带时间戳",
+      "code": "report/export_xlsx.py"
+    },
+    {
+      "id": "N5",
+      "name": "生成HTML报告",
+      "stage": "产出交付",
+      "complexity": "low",
+      "type": "end",
+      "func": "统计分数分布 → 出 HTML 报告",
+      "risk": "无",
+      "code": "report/build_html.py"
+    }
+  ],
+  "todos": [
+    {
+      "id": "T1",
+      "priority": "P0",
+      "what": "跑通 scripts/check_csv.py 校验原始数据",
+      "why": "列名不符会导致全量白跑，必须最先排除",
+      "verify": "打印表头正确；行数 = 3001（含表头）",
+      "complexity": "low",
+      "risk": "无",
+      "deps": "无"
+    },
+    {
+      "id": "T2",
+      "priority": "P0",
+      "what": "调 prompt_v2.md 并用 20 条小样本试跑",
+      "why": "prompt 质量是全量效果的上限，先小样本验证再放大",
+      "verify": "人工逐条看 20 条，明显不合理的 ≤ 2 条",
+      "complexity": "mid",
+      "risk": "返回格式不稳 → 先修解析再试",
+      "deps": "T1"
+    },
+    {
+      "id": "T3",
+      "priority": "P1",
+      "what": "全量判分，带断点续跑",
+      "why": "核心交付：3000 条全部出分",
+      "verify": "成功数 + 失败数 = 3000；失败清单单独导出",
+      "complexity": "high",
+      "risk": "限流中断 → 从中间结果断点续跑",
+      "deps": "T2"
+    },
+    {
+      "id": "T4",
+      "priority": "P2",
+      "what": "出 xlsx + HTML 报告，并抽 50 条人工复核",
+      "why": "交付物 + 质量背书（对应抽检一致率 ≥ 90% 指标）",
+      "verify": "文件生成且总数 = 3000；复核一致率达标",
+      "complexity": "low",
+      "risk": "覆盖旧报告 → 文件名强制带时间戳",
+      "deps": "T3"
+    }
+  ],
+  "status": {
+    "done": [
+      "T1 数据校验：表头正确，行数 3001 确认",
+      "读取需求文档并确认指标口径",
+      "搭建 judge-csv 目录结构",
+      "申请到判分模型 API key"
+    ],
+    "doing": [
+      "T2 prompt 调优：第 3 版 prompt 小样本试跑中"
+    ],
+    "blocked": []
+  },
+  "experience": [
+    "判分类 prompt 必须强制 JSON 输出格式，否则约千分之三的返回解析失败",
+    "模型接口并发超过 8 必现 429，压到 5 之后全程稳定"
+  ],
+  "repo_tree": "judge-csv/\n├── 数据/\n│   └── conversations_3000.csv\n├── judge/\n│   ├── run_batch.py\n│   └── prompt_v2.md\n├── report/\n│   ├── export_xlsx.py\n│   └── build_html.py\n└── scripts/\n    └── check_csv.py"
+}

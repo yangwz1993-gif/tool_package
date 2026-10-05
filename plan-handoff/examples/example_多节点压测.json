@@ -1,0 +1,155 @@
+{
+  "project": "多节点压测样例",
+  "goal": {
+    "one_liner": "验证 14 节点横向流程图在报告里的滚动与缩放表现。",
+    "metrics": [
+      {
+        "name": "节点数",
+        "target": "14",
+        "how": "全部渲染不丢边"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "N1",
+      "name": "数据源接入",
+      "stage": "接入",
+      "complexity": "low",
+      "func": "数据源接入的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n1.py"
+    },
+    {
+      "id": "N2",
+      "name": "格式校验",
+      "stage": "校验",
+      "complexity": "low",
+      "func": "格式校验的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n2.py"
+    },
+    {
+      "id": "N3",
+      "name": "字段标准化",
+      "stage": "预处理",
+      "complexity": "mid",
+      "func": "字段标准化的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n3.py"
+    },
+    {
+      "id": "N4a",
+      "name": "文本通道",
+      "stage": "并行加工",
+      "complexity": "mid",
+      "func": "文本通道的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n4a.py"
+    },
+    {
+      "id": "N4b",
+      "name": "语音通道",
+      "stage": "并行加工",
+      "complexity": "high",
+      "func": "语音通道的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n4b.py"
+    },
+    {
+      "id": "N4c",
+      "name": "工单通道",
+      "stage": "并行加工",
+      "complexity": "mid",
+      "func": "工单通道的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n4c.py"
+    },
+    {
+      "id": "N5",
+      "name": "三路合并",
+      "stage": "合并",
+      "complexity": "mid",
+      "func": "三路合并的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n5.py"
+    },
+    {
+      "id": "N6",
+      "name": "质量判定",
+      "stage": "判定",
+      "complexity": "high",
+      "func": "质量判定的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n6.py"
+    },
+    {
+      "id": "N7",
+      "name": "抽样复核",
+      "stage": "复核",
+      "complexity": "mid",
+      "func": "抽样复核的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n7.py"
+    },
+    {
+      "id": "N8",
+      "name": "报告交付",
+      "stage": "交付",
+      "complexity": "low",
+      "func": "报告交付的处理逻辑",
+      "risk": "无",
+      "code": "pipeline/n8.py"
+    }
+  ],
+  "edges": [
+    [
+      "N1",
+      "N2"
+    ],
+    [
+      "N2",
+      "N3"
+    ],
+    [
+      "N3",
+      "N4a"
+    ],
+    [
+      "N3",
+      "N4b"
+    ],
+    [
+      "N3",
+      "N4c"
+    ],
+    [
+      "N4a",
+      "N5"
+    ],
+    [
+      "N5",
+      "N6"
+    ],
+    [
+      "N6",
+      "N7"
+    ],
+    [
+      "N7",
+      "N8"
+    ]
+  ],
+  "todos": [
+    {
+      "id": "T1",
+      "priority": "P2",
+      "what": "跑通全流程",
+      "why": "验证 10 节点横向图渲染与滚动缩放",
+      "verify": "终态报告生成且图不丢边",
+      "complexity": "mid",
+      "risk": "无",
+      "deps": "无"
+    }
+  ]
+}
