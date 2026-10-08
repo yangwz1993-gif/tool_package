@@ -16,7 +16,7 @@ Agent 做方案/决策流程时**只填 JSON，不画任何图**。六个板块�
 | `get_mermaid.sh` | 没带 mermaid 时用它下载到本目录（也可以设 `HANDOFF_MERMAID` 指向已有副本） |
 | `skill.md` | 本文件：Agent 干活前必读的约定与字段规范 |
 | `模板.json` | 八键空白骨架，`hdo init` 就是照它生成新方案 |
-| `extensions/handoff.ts` | 可选的 pi 扩展本体：提供 `/handoff` 浮窗入口（读/写两条路径） |
+| `extensions/handoff.ts` | 可选的 pi 扩展本体：提供 `/handoff-read` 与 `/handoff-write` 两条命令 |
 | `index.ts` | 扩展入口转接：让整个文件夹能被 pi 直接加载（pi 只认目录下的 `index.ts`） |
 | `README.md` | 给人看的 3 分钟上手指南 |
 | `examples/` | 三个可直接跑的示例输入：单链版 / DAG 版（带节点类型）/ 多节点压测版，另附一份生成好的 HTML 产物样例 |
@@ -24,9 +24,9 @@ Agent 做方案/决策流程时**只填 JSON，不画任何图**。六个板块�
 ## 这套工具装在哪（位置前提）
 
 - 这个文件夹**可以放在任何位置**，脚本之间只用相对自身目录的路径互相找（`Path(__file__).resolve().parent`），内部没有写死任何人的绝对路径。
-- `skill.md` **不是 pi 自动加载的 skill**（它没有 frontmatter、也不放在 pi 的 skills 目录）：它是给 agent 读的说明书，靠 `/handoff` 扩展或人工把路径告诉 agent。所以「装在哪」不影响可用性，只影响你怎么把路径告诉 agent。
+- `skill.md` **不是 pi 自动加载的 skill**（它没有 frontmatter、也不放在 pi 的 skills 目录）：它是给 agent 读的说明书，靠 `/handoff-read`、`/handoff-write` 命令或人工把路径告诉 agent。所以「装在哪」不影响可用性，只影响你怎么把路径告诉 agent。
 - 想用 `/handoff` 浮窗的话有两种装法：整包拷进 `~/.pi/agent/extensions/plan-handoff/`（pi 加载其中的 `index.ts`，扩展自己找到同级的 hdo.py/skill.md，零配置）；或只拷 `extensions/handoff.ts` 到 `~/.pi/agent/extensions/handoff.ts`（首次运行会问你工具目录）。
-- `/handoff` 扩展按这个顺序找工具目录：环境变量 `HANDOFF_TOOL_DIR` → 配置文件 `~/.pi/agent/handoff-tool.json` 的 `toolDir` → 扩展自己所在目录及其上一级 → 都没有就在浮窗里问你一次并把路径记进配置文件。
+- 两条命令按这个顺序找工具目录：环境变量 `HANDOFF_TOOL_DIR` → 配置文件 `~/.pi/agent/handoff-tool.json` 的 `toolDir` → 扩展自己所在目录及其上一级 → 都没有就在浮窗里问你一次并把路径记进配置文件。
 - 环境变量 `HANDOFF_MERMAID` 可指向别处的 `mermaid.min.js`（多项目共用一份，不必到处放 3.2MB）；`HANDOFF_PYTHON` 可指定 python 解释器（默认 `python3`，Windows 上常要改成 `python`）。
 
 ## 用法
@@ -48,7 +48,7 @@ python3 hdo.py handoff/方案.json todo done T3
 
 校验失败会直接报错退出（缺字段 / 节点 id 重复 / 引用了不存在的节点 / complexity 非法 / 判断节点缺带 label 的出边等），改对再跑。
 
-## handoff 目录约定（/handoff 命令触发时必须遵守）
+## handoff 目录约定（/handoff-read、/handoff-write 触发时必须遵守）
 
 1. 在**当前项目仓库根目录**下建 `handoff/` 文件夹（已存在则直接用；可用 `hdo init <仓库目录> <项目名>` 一步建好）
 2. 方案 JSON 放在 handoff/ 下，命名：`YYMMDD_项目名_方案.json`
@@ -63,28 +63,32 @@ python3 hdo.py handoff/方案.json todo done T3
    输出的 HTML 自动写在 handoff/ 下，固定文件名 `{项目}_方案报告.html`，**每次复写只留最新**（HTML 是由 JSON 生成的视图，随时能重新生成，复写不会丢信息）；大改版前想留底：`python3 gen_report.py 输入.json --keep`。
 4. 完成后向人汇报：JSON 路径 + 最新 HTML 路径。
 
-## 读流程与浮窗交互（/handoff 命令）
+## 两条命令：/handoff-read 与 /handoff-write
 
-`/handoff` 是 `extensions/handoff.ts` 提供的 pi 扩展入口（安装方式见 `README.md`）。全程浮窗交互，**交互过程不进上下文**，只有最后一条指令会作为用户消息发给 agent。
+`extensions/handoff.ts` 提供两条 pi 命令（安装方式见 `README.md`），读和写各管一件事，**不再弹「读 / 写」选择框**。交互过程不进上下文，只有最后一条指令会作为用户消息发给 agent；Esc 随时取消。
 
-- 输入 `/handoff`（不带参数）：先选「读」还是「写」；Esc 随时取消。
-- 输入 `/handoff <需求文字>`：跳过读/写选择，直接按写流程走，需求文字原样带进最终指令（兼容老用法）。
-- 定位方案文件：扫当前仓库 `handoff/` 下所有 `*.json`，按修改时间倒序——
-  - 只有一个：弹确认框，确认即用它，取消则手填路径；
-  - 有多个：列表让你选（附修改时间），可选「自己填路径」；
-  - 一个都没有 + 写模式：问是否在仓库根目录新建 `handoff/`，确认后填项目名，等价于跑一次 `hdo init <仓库目录> <项目名>`；
-  - 一个都没有 + 读模式：直接让你粘贴 JSON 路径。
-- 找不到工具目录（`hdo.py` 所在文件夹）时：浮窗问你一次路径，验证通过后写进 `~/.pi/agent/handoff-tool.json`，以后不再问。
+| 命令 | 干什么 | 参数 |
+|------|--------|------|
+| `/handoff-read` | 读：理解当前项目（只读，不改任何文件） | 可选：方案 JSON 路径 + 关注点 |
+| `/handoff-write` | 写：新建或更新方案文件 | 可选：方案 JSON 路径 + 本次需求 |
 
-**写模式发出的指令**：`根据 handoff 的要求更新 <JSON 路径>。本次需求：…` + 指向本文件「hdo.py 命令参考」「字段规范」「handoff 目录约定」三节，并要求先完整读 skill.md。
+定位方案文件（两条命令共用，**能不问就不问**）：
+
+1. 参数里的方案路径：**首个 token** 以 `.json` 结尾就直接用；否则只在「恰好一个 token 以 `.json` 结尾、且看起来像方案文件（落在 `handoff/` 下或名为 `*_方案.json`）并且文件确实存在」时才当路径。满足任一条就跳过后面所有推导——这样需求正文里提到 `config.json` 不会把整条参数带偏；
+2. 否则扫当前仓库 `handoff/` 下所有 `*.json`，按修改时间倒序——
+   - **只有一个** → 直接用它，连确认框都不弹；
+   - **有多个** → 列表让你选（附修改时间），可选「自己填路径」；写模式额外有「🆕 新建一个方案」；
+   - **一个都没有 + 写** → 直接跑 `hdo init <仓库目录> <项目名>`（项目名默认取目录名，只问这一次），不再弹「是否新建」确认框；
+   - **一个都没有 + 读** → 让你粘贴 JSON 路径。
+3. 无 UI 模式（`pi -p`、JSON 模式）同样可用：推导得出来就照发；需要弹窗时直接报错，并提示用参数显式指定路径。
+
+找不到工具目录（`hdo.py` 所在文件夹）时：浮窗问你一次路径，验证通过后写进 `~/.pi/agent/handoff-tool.json`，以后不再问。
+
+**写命令发出的指令**：`根据 handoff 的要求更新 <JSON 路径>` + `本次需求：…` + 指向本文件「hdo.py 命令参考」「字段规范」「handoff 目录约定」三节，并要求先完整读 skill.md。
 
 > 所以 agent 收到指令后第一件事是把 skill.md 读全，不要凭记忆或惯例开工；字段名、校验规则、命名约定全以本文件为准。
 
-**读模式发出的指令**：`理解下 <JSON 路径>` + 说明这份 JSON 记什么 + 要求 agent **同时调查它所在的仓库**（README、目录结构、关键代码），最后简要汇报三件事：
-
-- 项目背景（这个项目在干什么、给谁用）
-- 项目目标（含衡量指标）
-- 当前 TODO
+**读命令发出的指令**：`理解下 <JSON 路径>` + 说明这份 JSON 记什么 + 要求 agent **同时调查它所在的仓库**（README、目录结构、关键代码），最后简要汇报四件事：项目背景（在干什么、给谁用）、项目目标（含衡量指标）、当前 TODO（按优先级）、当前状态与阻塞。命令带了第二个参数时会追加一条「本次重点关注：…」。
 
 读模式下 agent **不改任何文件**，只汇报。读流程的价值在于接手别人做过的项目：先读方案再动手；汇报时如果发现 JSON 与仓库实际状态对不上（TODO 已完成但没销账、文件已删但流程图里还画着、repo_tree 过期），要明确指出来，这是发现方案过期的主要手段。
 
@@ -107,6 +111,8 @@ python3 hdo.py handoff/方案.json todo done T3
 | `hdo <json> status abort <文本>` / `status unabort <T编号>` | 已中止增/删（自由文本，替换逻辑同 doing） |
 | `hdo <json> exp add <文本>` | 经验沉淀追加 |
 | `hdo <json> tree set < 树.txt` | 刷新「当前仓库结构」（从标准输入读，支持 `tree -L 2 \| hdo … tree set`） |
+
+`deps` 里形如 `T2` 的编号会被 `todo add/edit` 校验存在性：指向已不存在的待办时只在输出里给警告、不阻断（外部依赖与「可与 T2 并行」这类说明照写）。`todo done/abort/rm` 之后，如果还有别的 todo 的 deps 引用刚消失的编号，命令也会一并提示。
 
 全局选项 `--no-gen`：本次改完不重新生成 HTML。所有 mutating 命令先整体校验再写盘，**校验不过文件不动**。
 
@@ -199,3 +205,5 @@ python3 hdo.py handoff/方案.json todo done T3
 4. 流程图方向固定为**从左到右**（阶段从左到右推进，阶段内节点竖排），支持两种模式：**顺序单链**（不写 edges，按 nodes 顺序连）和 **DAG**（写 edges，支持分支/并行/汇合/回流）；回流边用 label 注明含义（如"回流重判"）
 5. 产物只有 HTML：单文件离线可看（内嵌 mermaid）。图的交互：点击节点弹详情弹窗（含备注和索引信息，可一键复制发给 agent）、双指捏合缩放、双指滑动或按住拖拽平移；流程走向固定为左上→右下。流程图 nodes/edges、goal 等结构性低频改动可直接编辑 JSON，改完跑 `hdo <json> gen` 重新生成
 6. 节点 id 只能以字母开头、由字母数字下划线组成（N1/N2…即可）；name/stage/note 里不得出现半角 < > " \ ( ) / 字符（会破坏形状语法，请用全角或改写）
+7. `todos` **允许为空**（所有待办销账后照常写盘，报告第 4 节显示「（无待办）」占位）；todo id 不得重复；`project` 不得含路径分隔符 / \\ 或控制字符（它是 HTML 文件名的来源）——这三条都在 `gen_report.validate` 里硬校验
+8. deps 悬空只警告不阻断（见「hdo.py 命令参考」下的说明），但报告会把原样文字展示出来，接手的人靠它判断前置依赖——所以警告别忽略，要么补上那条待办，要么把依赖改成外部说明

@@ -42,6 +42,8 @@ USAGE = """用法：
   hdo <json> status unabort <T编号>
   hdo <json> exp add <文本>              经验沉淀追加
   hdo <json> tree set < 树形文件          刷新当前仓库结构（从标准输入读）
+说明：todo add/edit 的 --deps 里形如 T2 的编号会做存在性校验，指向不存在的待办时给警告（只提醒，不阻断）
+       todo done/abort/rm 后，若其它 todo 的 deps 还引用已消失的编号，会一并提示
 全局选项：--no-gen（本次改完不重新生成 HTML）
 """
 
@@ -101,6 +103,19 @@ def find_todo(todos, tid):
     die(f"找不到待办 {tid}（现有：{'、'.join(x.get('id', '?') for x in todos) or '无'}）")
 
 
+# deps 里只有形如 T2 / T2b 的编号才做存在性校验；「外部依赖」「可与 T2 并行」里的说明不受影响
+DEP_RE = re.compile(r"\bT\d+[A-Za-z]?\b")
+
+
+def dep_refs(text):
+    return set(DEP_RE.findall(text or ""))
+
+
+def dangling_deps(d, tid):
+    """d 里其它 todo 的 deps 是否还引用 tid（按编号 token 精确匹配，T1 不会误匹配 T10）"""
+    return [x["id"] for x in d.get("todos", []) if tid in dep_refs(x.get("deps"))]
+
+
 # ---------- todo ----------
 
 def cmd_todo(d, rest):
@@ -125,10 +140,13 @@ def cmd_todo(d, rest):
             if m:
                 nums.append(int(m.group(1)))
         new_id = f"T{(max(nums) if nums else 0) + 1}"
+        deps = f.get("deps") or "无"
         todos.append({"id": new_id, "priority": f["priority"], "what": f["what"],
                       "why": f["why"], "verify": f["verify"], "complexity": f["complexity"],
-                      "risk": f["risk"], "deps": f.get("deps") or "无"})
-        return f"todo {new_id} 已添加（{f['priority']}/{f['complexity']}）"
+                      "risk": f["risk"], "deps": deps})
+        missing = sorted(dep_refs(deps) - {t.get("id") for t in todos})
+        warn = f"｜⚠️ deps 引用了不存在的编号：{'、'.join(missing)}（仅提醒，已照写）" if missing else ""
+        return f"todo {new_id} 已添加（{f['priority']}/{f['complexity']}）{warn}"
 
     if sub in ("done", "edit", "rm", "abort"):
         if not rest:
@@ -138,7 +156,7 @@ def cmd_todo(d, rest):
 
         if sub == "rm":
             d["todos"] = [x for x in todos if x.get("id") != tid]
-            refs = [x["id"] for x in d["todos"] if tid in (x.get("deps") or "")]
+            refs = dangling_deps(d, tid)
             warn = f"｜⚠️ 注意：{'、'.join(refs)} 的 deps 还引用它" if refs else ""
             return f"todo {tid} 已删除{warn}"
 
@@ -151,7 +169,12 @@ def cmd_todo(d, rest):
             if "complexity" in f and f["complexity"] not in CMPLX:
                 die(f"complexity 只能是 low/mid/high，当前：{f['complexity']}")
             t.update(f)
-            return f"todo {tid} 已更新（{'、'.join(f)}）"
+            warn = ""
+            if "deps" in f:
+                missing = sorted(dep_refs(f["deps"]) - {x.get("id") for x in todos})
+                if missing:
+                    warn = f"｜⚠️ deps 引用了不存在的编号：{'、'.join(missing)}（仅提醒，已照写）"
+            return f"todo {tid} 已更新（{'、'.join(f)}）{warn}"
 
         # done / abort：从 TODO 移除，记入对应状态最前，并清掉同编号的进行中/阻塞
         note = " ".join(rest[1:]).strip()
@@ -165,7 +188,9 @@ def cmd_todo(d, rest):
         line = f"{tid} {t['what']}" + (f"（{note}）" if note else "")
         lst.insert(0, line)
         label = "已完成" if sub == "done" else "已中止"
-        return f"todo {tid} {label}，记入「{label}」最前"
+        refs = dangling_deps(d, tid)
+        warn = f"｜⚠️ 注意：{'、'.join(refs)} 的 deps 还引用它" if refs else ""
+        return f"todo {tid} {label}，记入「{label}」最前{warn}"
 
     die(f"未知 todo 子命令：{sub}（add/done/edit/rm/abort）")
 

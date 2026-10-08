@@ -91,6 +91,10 @@ def validate(d: dict):
     for k in ("project", "goal", "nodes", "todos"):
         if k not in d:
             fail(f"缺少顶层字段「{k}」")
+    if not isinstance(d["project"], str) or not d["project"].strip():
+        fail("project 必须是非空字符串（报告标题与 HTML 文件名都取自它）")
+    if re.search(r'[\\/]', d["project"]) or any(unicodedata.category(c) == "Cc" for c in d["project"]):
+        fail(f"project 名「{d['project']}」不能含路径分隔符 / \\ 或换行等控制字符（它是 HTML 文件名的来源）")
     g = d["goal"]
     if "one_liner" not in g:
         fail("goal.one_liner 缺失")
@@ -138,12 +142,17 @@ def validate(d: dict):
                 if "|" in x or "\n" in x:
                     fail(f"{n['id']} 的 code 条目不能含 | 或换行（会破坏表格）")
 
-    if not d["todos"]:
-        fail("todos 不能为空")
+    # todos 允许为空：项目收尾时所有待办都已销账，报告第 4 节会显示「（无待办）」占位
+    tids = set()
     for i, t in enumerate(d["todos"]):
         for k in ("id", "priority", "what", "why", "verify", "complexity", "risk"):
             if k not in t:
                 fail(f"todos[{i}] 缺少「{k}」")
+        if not isinstance(t["id"], str) or not t["id"].strip():
+            fail(f"todos[{i}] 的 id 必须是非空字符串")
+        if t["id"] in tids:
+            fail(f"待办 id 重复：{t['id']}（销账与排序会产生歧义，请改成唯一编号）")
+        tids.add(t["id"])
         if t["complexity"] not in EMOJI:
             fail(f"{t['id']} 的 complexity 只能是 low/mid/high")
         if t["priority"] not in PRIO:
@@ -652,7 +661,7 @@ def render_html(d: dict, mermaid_code: str, ts: datetime) -> str:
         f"<td>{esc(t['verify'])}</td><td>{badge(t['complexity'])}</td>"
         f"<td>{esc(t['risk'])}</td><td>{esc(t.get('deps') or '无')}</td></tr>"
         for t in todos_sorted
-    )
+    ) or '  <tr><td colspan="8" class="muted">（无待办：当前所有 TODO 均已销账）</td></tr>'
     return (HTML_TEMPLATE
             .replace("__PROJECT__", esc(d["project"]))
             .replace("__TIME__", ts.strftime("%Y-%m-%d %H:%M"))
