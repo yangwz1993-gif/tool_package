@@ -1,0 +1,7 @@
+{
+  "_说明": "settings.json 中与 TUI 显示相关的配置片段，合并进 ~/.pi/agent/settings.json 即可（其余字段如 defaultProvider 等按个人需要保留）",
+  "theme": "dark",
+  "packages": [
+    "npm:pi-pretty-tui"
+  ]
+}

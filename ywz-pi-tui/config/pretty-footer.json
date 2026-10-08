@@ -1,0 +1,4 @@
+{
+  "_说明": "pretty-footer 状态栏扩展的配置文件，放在 ~/.pi/agent/pretty-footer.json；不存在时默认启用",
+  "enabled": true
+}
