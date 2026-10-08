@@ -1,0 +1,575 @@
+diff --git a/src/controller.ts b/src/controller.ts
+index 095d473..b93c324 100644
+--- a/src/controller.ts
++++ b/src/controller.ts
+@@ -1,5 +1,5 @@
+ import { join } from "node:path";
+-import { isMissing, loadAllowlist, loadPushTarget, readPrivateJson, saveAllowlist, savePushTarget, writePrivateJson } from "./storage.ts";
++import { isMissing, loadAllowlist, loadConversations, loadPushTarget, readPrivateJson, saveAllowlist, saveConversations, savePushTarget, writePrivateJson, type ChatConversations } from "./storage.ts";
+ import { conversationKey, type BotConfig, type BotTransport, type IncomingMessage, type ModelSpec, type PushTarget, type ConversationWorker, type WorkerFactory, type WorkerEvent, type WorkerRequest, type WorkerResponse } from "./types.ts";
+ import { modelPickerCard, modelSelectedCard, parseModelCardAction } from "./model-card.ts";
+ 
+@@ -120,6 +120,13 @@ export interface ControllerOptions {
+ 
+ /** Pushes are unsolicited, so bound both their size and their rate. */
+ const PUSH_WINDOW_MS = 60_000, PUSH_MAX_PER_WINDOW = 20, PUSH_MAX_PARTS = 4;
++/**
++ * Receipt signal put on the sender's own message. Feishu renders emoji_type "OK" as ✅.
++ * Best effort only: see BotTransport.react in types.ts for why it must never throw.
++ */
++const ACK_EMOJI = "OK";
++/** Conversations one chat may keep open at the same time. Each one costs a pane and a pi process. */
++export const MAX_CONVERSATIONS = 8;
+ /** Recent denials the local operator can pick from; never written to disk. */
+ const DENIED_LIMIT = 5;
+ 
+@@ -150,13 +157,44 @@ function unsupportedNote(message: IncomingMessage): string {
+   return `暂时只能处理文字消息，这条是 ${message.text} 类型。请改用文字重新发送。`;
+ }
+ 
+-type BotCommand = { name: "new" | "stop" | "model"; arg: string };
++type BotCommand = { name: "new" | "reset" | "list" | "switch" | "close" | "stop" | "model"; arg: string };
+ function command(text: string): BotCommand | undefined {
+-  const match = text.trim().match(/^\/(new|stop|model)(?:\s+(.+?))?\s*$/i);
++  const match = text.trim().match(/^\/(new|reset|list|switch|close|stop|model)(?:\s+(.+?))?\s*$/i);
+   if (!match) return undefined;
+   return { name: match[1]!.toLowerCase() as BotCommand["name"], arg: match[2]?.trim() ?? "" } as BotCommand;
+ }
+ 
++/**
++ * Conversation key for one chat. The first conversation keeps the bare chat key, so an
++ * existing chat's Pi history and pane name never move; later ones append `#N`.
++ */
++export function keyForSlot(chatKey: string, slot: number): string {
++  return slot === 1 ? chatKey : `${chatKey}#${slot}`;
++}
++
++/**
++ * Commands that only rearrange or describe the chat's conversations take effect on arrival:
++ * a message sent right after /new must land in the new conversation, and /list must not wait
++ * behind a turn that may run for minutes. /model and /reset stay in the FIFO because they
++ * interrupt or replace the conversation they are sent to; /stop already bypasses it.
++ */
++const IMMEDIATE_COMMANDS = new Set<BotCommand["name"]>(["new", "switch", "list", "close"]);
++
++/** `MM-DD HH:MM` in local time; the listener and the phone share one machine's clock. */
++function shortTime(iso: string): string {
++  const at = new Date(iso);
++  if (!iso || Number.isNaN(at.getTime())) return "-";
++  const pad = (value: number) => `${value}`.padStart(2, "0");
++  return `${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
++}
++
++/** Parse `/switch 3` style arguments into a 1-based conversation number. */
++function slotArg(arg: string): number | undefined {
++  const match = arg.trim().match(/^(\d{1,3})$/);
++  const slot = match ? Number(match[1]) : 0;
++  return slot >= 1 ? slot : undefined;
++}
++
+ export class BotController {
+   private active = false;
+   private readonly models = new Map<string, ModelSpec>();
+@@ -170,6 +208,8 @@ export class BotController {
+   private readonly authorizationAbort = new AbortController();
+   private readonly authorizations = new Map<string, Promise<boolean>>();
+   private allowlist = new Set<string>();
++  /** Per-chat conversations. A chat with no entry behaves as a single conversation (#1). */
++  private readonly conversations = new Map<string, ChatConversations>();
+   /** Conversation key to its chat, so "set the push target here" needs no ID from the model. */
+   private readonly chats = new Map<string, { chatId: string; chatType: "p2p" | "group" }>();
+   private readonly channels = new Map<string, { worker: ConversationWorker; output: ChatOutput }>();
+@@ -192,6 +232,9 @@ export class BotController {
+       if (!stored || !Array.isArray(stored.ids) || stored.ids.some((x) => typeof x !== "string")) throw new Error("Invalid seen.json");
+       if (stored.appId === this.options.config.appId) this.seen = new Set(stored.ids.slice(-10_000));
+     } catch (error) { if (!isMissing(error)) throw error; }
++    for (const [chatKey, chat] of Object.entries(await loadConversations(this.options.stateDir, this.options.config.appId))) {
++      this.conversations.set(chatKey, chat);
++    }
+     this.allowlist = await loadAllowlist(this.options.stateDir, this.options.config.appId);
+     this.pushTarget = await loadPushTarget(this.options.stateDir, this.options.config.appId);
+     if (this.stopping) throw new Error("Controller was stopped during startup.");
+@@ -230,26 +273,35 @@ export class BotController {
+         return;
+       }
+       if (!this.active) return;
+-      const key = conversationKey(message);
++      // Resolve the conversation here, at admission: a chat's active conversation can change
++      // while this message waits in the FIFO, and the message still belongs to the one that
++      // was active when the sender sent it.
++      const chatKey = conversationKey(message);
++      const chat = this.chatState(chatKey);
++      const key = keyForSlot(chatKey, chat.active);
++      const used = chat.slots.find((slot) => slot.id === chat.active);
++      if (used) used.lastUsedAt = new Date().toISOString();
+       const botCommand = command(message.text);
++
++      if (botCommand && IMMEDIATE_COMMANDS.has(botCommand.name)) {
++        if (!await this.admit(message, key)) return;
++        await this.executeCommand(message, chatKey, key, botCommand);
++        return;
++      }
+       const run = async () => {
+-        if (!this.active) return;
+-        if (!await this.isAllowed(message)) {
+-          if (this.active) await this.options.transport.send(message.chatId,
+-            `⛔ 同步率不足，本机拒绝启动。\n授权码：${senderCode(message.userId)} —— 请交给本机驾驶员完成同步。`, message.id);
+-          return;
+-        }
+-        if (!this.active) return;
+-        this.chats.set(key, { chatId: message.chatId, chatType: message.chatType === "group" ? "group" : "p2p" });
++        if (!await this.admit(message, key)) return;
+         if (message.unsupported && !(message.unsupported === "empty_text" && message.parentMessageId)) {
+           await this.options.transport.send(message.chatId, unsupportedNote(message), message.id);
+           return;
+         }
+-        if (botCommand) await this.executeCommand(message, key, botCommand);
+-        else await this.execute(message);
++        if (botCommand) await this.executeCommand(message, chatKey, key, botCommand);
++        else await this.execute(message, key);
+       };
+       // Interrupts must bypass the FIFO and its capacity limit, but not authorization.
+       if (botCommand?.name === "stop") { await run(); return; }
++      // Multi-conversation chats keep their /list timestamps fresh; single-conversation chats
++      // never write this file at all. Awaited so drain() covers it before shutdown.
++      if (chat.slots.length > 1) await this.persistConversations().catch(this.onError);
+       let queue = this.users.get(key);
+       if (!queue) { queue = { tail: Promise.resolve(), count: 0 }; this.users.set(key, queue); }
+       if (queue.count >= 20 || Buffer.byteLength(message.text) + (message.chatType === "group" ? Buffer.byteLength(message.userId) + 2 : 0) > 64_000) {
+@@ -266,6 +318,27 @@ export class BotController {
+     return Promise.resolve();
+   }
+ 
++  /**
++   * Authorization and the receipt signal, shared by the queued path and immediate commands.
++   * Returns false when the message must not be acted on any further.
++   */
++  private async admit(message: IncomingMessage, key: string): Promise<boolean> {
++    if (!this.active) return false;
++    if (!await this.isAllowed(message)) {
++      if (this.active) await this.options.transport.send(message.chatId,
++        `⛔ 同步率不足，本机拒绝启动。\n授权码：${senderCode(message.userId)} —— 请交给本机驾驶员完成同步。`, message.id);
++      return false;
++    }
++    if (!this.active) return false;
++    // Signal receipt before the model starts: an ACK that arrives after the answer
++    // tells the sender nothing, so this is fire-and-forget and never awaited. The
++    // reaction implementation already swallows its own failures; the catch here keeps a
++    // transport that breaks that contract from becoming an unhandled rejection.
++    void this.options.transport.react?.(message.id, ACK_EMOJI)?.catch(this.onError);
++    this.chats.set(key, { chatId: message.chatId, chatType: message.chatType === "group" ? "group" : "p2p" });
++    return true;
++  }
++
+   private async isAllowed(message: IncomingMessage): Promise<boolean> {
+     // The allowlist follows the human sender across direct and group chats.
+     if (this.allowlist.has(message.userId)) return true;
+@@ -294,7 +367,58 @@ export class BotController {
+     return decision;
+   }
+ 
+-  private async executeCommand(message: IncomingMessage, key: string, value: BotCommand): Promise<void> {
++  /**
++   * This chat's conversations, created on first use. A chat that never runs a conversation
++   * command stays a single conversation, so nothing is written to disk for it.
++   */
++  private chatState(chatKey: string): ChatConversations {
++    let chat = this.conversations.get(chatKey);
++    if (!chat) {
++      const now = new Date().toISOString();
++      chat = { active: 1, next: 2, slots: [{ id: 1, createdAt: now, lastUsedAt: now }] };
++      this.conversations.set(chatKey, chat);
++    }
++    return chat;
++  }
++
++  /** Conversations cost a pane and a pi process each, so only persist chats that use more than one. */
++  private async persistConversations(): Promise<void> {
++    const chats: Record<string, ChatConversations> = {};
++    for (const [chatKey, chat] of this.conversations) if (chat.slots.length > 1) chats[chatKey] = chat;
++    await saveConversations(this.options.stateDir, this.options.config.appId, chats);
++  }
++
++  /** Pane/connection state for one conversation, from the worker factory's live view. */
++  private conversationState(key: string): string {
++    const live = this.options.workers.list?.().find((pane) => pane.key === key);
++    if (!live) return "分屏未启动";
++    return live.connected ? `分屏 ${live.paneId ?? "启动中"} · 已连接` : `分屏 ${live.paneId ?? "启动中"} · 未连接`;
++  }
++
++  private conversationList(chatKey: string): string {
++    const chat = this.chatState(chatKey);
++    const lines = chat.slots.map((slot) => {
++      const parts = [
++        slot.title ? `「${slot.title}」` : "",
++        slot.id === chat.active ? "← 当前" : "",
++        this.conversationState(keyForSlot(chatKey, slot.id)),
++        `最后使用 ${shortTime(slot.lastUsedAt)}`,
++      ].filter(Boolean);
++      return `- #${slot.id} ${parts.join(" · ")}`;
++    });
++    return `本聊天共 ${chat.slots.length} 个会话（上限 ${MAX_CONVERSATIONS}）：\n${lines.join("\n")}\n\n/switch N 切换 · /new [标题] 新建 · /close N 关闭 · /reset 清空当前`;
++  }
++
++  /** Resolve a `/switch N` or `/close N` argument against the conversations this chat has now. */
++  private findSlot(chatKey: string, arg: string): { slot?: ChatConversations["slots"][number]; error?: string } {
++    const id = slotArg(arg);
++    if (id === undefined) return { error: "用法：/switch N 或 /close N（N 是会话编号，用 /list 查看）" };
++    const slot = this.chatState(chatKey).slots.find((item) => item.id === id);
++    if (!slot) return { error: `这个聊天里没有会话 #${id}。用 /list 查看编号。` };
++    return { slot };
++  }
++
++  private async executeCommand(message: IncomingMessage, chatKey: string, key: string, value: BotCommand): Promise<void> {
+     const { transport, workers } = this.options;
+     if (value.name === "stop") {
+       if (value.arg) { await transport.send(message.chatId, "用法：/stop", message.id); return; }
+@@ -310,11 +434,81 @@ export class BotController {
+       return;
+     }
+     if (value.name === "new") {
++      const chat = this.chatState(chatKey);
++      if (chat.slots.length >= MAX_CONVERSATIONS) {
++        await transport.send(message.chatId,
++          `这个聊天已经有 ${chat.slots.length} 个会话，达到上限（${MAX_CONVERSATIONS}）。先用 /close N 关掉一个，再新建。`, message.id);
++        return;
++      }
++      const previous = chat.active, id = chat.next++;
++      const now = new Date().toISOString();
++      chat.slots.push({ id, ...(value.arg ? { title: value.arg.slice(0, 80) } : {}), createdAt: now, lastUsedAt: now });
++      chat.active = id;
++      try { await this.persistConversations(); }
++      catch (error) {
++        this.onError(error);
++        await transport.send(message.chatId, "⚠️ 新会话已建立，但会话列表没能存盘；重启监听后可能丢编号。", message.id);
++        return;
++      }
++      await transport.send(message.chatId,
++        `已新建会话 #${id}${value.arg ? `「${value.arg.slice(0, 80)}」` : ""}，并切换过去。\n\n` +
++        `下一条消息进这个新会话：独立的 pi 会话与分屏，和 #${previous} 的历史互不影响。\n` +
++        `#${previous} 不会关闭，发一句 /switch ${previous} 就回到它。\n\n/list 看全部 · /new 再开一个`, message.id);
++      return;
++    }
++    if (value.name === "list") {
++      if (value.arg) { await transport.send(message.chatId, "用法：/list", message.id); return; }
++      await transport.send(message.chatId, this.conversationList(chatKey), message.id);
++      return;
++    }
++    if (value.name === "switch") {
++      const found = this.findSlot(chatKey, value.arg);
++      if (!found.slot) { await transport.send(message.chatId, found.error!, message.id); return; }
++      const chat = this.chatState(chatKey);
++      chat.active = found.slot.id;
++      found.slot.lastUsedAt = new Date().toISOString();
++      try { await this.persistConversations(); } catch (error) { this.onError(error); }
++      const target = keyForSlot(chatKey, found.slot.id);
++      await transport.send(message.chatId,
++        `已切换到会话 #${found.slot.id}${found.slot.title ? `「${found.slot.title}」` : ""}。\n` +
++        `${this.conversationState(target)}。下一条消息进这个会话。`, message.id);
++      return;
++    }
++    if (value.name === "close") {
++      const found = this.findSlot(chatKey, value.arg);
++      if (!found.slot) { await transport.send(message.chatId, found.error!, message.id); return; }
++      const chat = this.chatState(chatKey);
++      if (chat.slots.length === 1) {
++        await transport.send(message.chatId,
++          "这是当前唯一的会话。用 /reset 清空它的历史，或先 /new 建一个再关这个。", message.id);
++        return;
++      }
++      const id = found.slot.id, target = keyForSlot(chatKey, id);
++      this.channels.get(target)?.output.close(); this.channels.delete(target);
++      this.running.get(target)?.abort();
++      try { await workers.closeConversation?.(target); }
++      catch (error) {
++        this.onError(error);
++        await transport.send(message.chatId, `无法关闭会话 #${id} 的分屏，请到本机检查。`, message.id);
++        return;
++      }
++      chat.slots = chat.slots.filter((slot) => slot.id !== id);
++      // Closing the conversation that new messages went to: fall back to the lowest one left.
++      const next = chat.active !== id ? undefined : [...chat.slots].sort((a, b) => a.id - b.id)[0]!;
++      if (next) chat.active = next.id;
++      try { await this.persistConversations(); } catch (error) { this.onError(error); }
++      await transport.send(message.chatId,
++        `已关闭会话 #${id}${found.slot.title ? `「${found.slot.title}」` : ""}（分屏已关，历史文件保留在本机）。` +
++        (next ? `\n下一条消息进会话 #${next.id}。` : ""), message.id);
++      return;
++    }
++    if (value.name === "reset") {
++      if (value.arg) { await transport.send(message.chatId, "用法：/reset（只清空当前会话）", message.id); return; }
+       if (!workers.reset) throw new Error("This worker does not support session reset");
+       this.channels.get(key)?.output.close(); this.channels.delete(key);
+       await workers.reset(key);
+       this.models.delete(key);
+-      await transport.send(message.chatId, "已开启新的 Pi 会话。", message.id);
++      await transport.send(message.chatId, "已清空当前会话的历史并关闭它的分屏；下一条消息会开一个全新的 pi 会话。", message.id);
+       return;
+     }
+     if (!value.arg) {
+@@ -477,9 +671,9 @@ export class BotController {
+     return { ok: true, text: `已推送到${target.chatType === "group" ? "群聊" : "私聊"} ${target.chatId}。` };
+   }
+ 
+-  private async execute(message: IncomingMessage): Promise<void> {
++  private async execute(message: IncomingMessage, key: string): Promise<void> {
+     const { transport, workers } = this.options;
+-    const key = conversationKey(message), abort = new AbortController();
++    const abort = new AbortController();
+     this.running.set(key, abort);
+     const { signal } = abort;
+ 
+diff --git a/src/index.ts b/src/index.ts
+index ecceac5..7edf52f 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -211,7 +211,7 @@ export default function larkBot(pi: ExtensionAPI): void {
+             `Allowlisted users: ${status?.allowlisted ?? 0} · Chats: ${status?.users ?? 0} · Pending handoffs: ${status?.queued ?? 0}`,
+             `Push target: ${target ? `${target.chatType === "group" ? "group" : "direct chat"} ${target.chatId}` : "none (pushing disabled)"}`,
+             ...(status?.denied ? [`Recent rejections awaiting review: ${status.denied} (run /lark-bot allow)`] : []),
+-            ...(status?.sessions.map((session) => `${session.userId} → pane ${session.paneId ?? "starting"} · ${session.connected ? "connected" : "disconnected"}`) ?? []),
++            ...(status?.sessions.map((session) => `${session.slot > 1 ? `${session.userId}#${session.slot}` : session.userId} → pane ${session.paneId ?? "starting"} · ${session.connected ? "connected" : "disconnected"}`) ?? []),
+             `Storage: ${stateDir}`,
+           ].join("\n"), "info");
+           return;
+diff --git a/src/lark.ts b/src/lark.ts
+index 43f4fe0..1827c95 100644
+--- a/src/lark.ts
++++ b/src/lark.ts
+@@ -117,6 +117,23 @@ export class LarkTransport implements BotTransport {
+ 
+   async update(messageId: string, text: string): Promise<void> { await this.updateCard(messageId, card(text)); }
+ 
++  /**
++   * Add the acknowledgement reaction to an inbound message.
++   * Best-effort by contract: this never throws, so a missing reaction (scope revoked,
++   * message recalled, transient API failure) can never delay or drop the reply.
++   */
++  async react(messageId: string, emoji: string): Promise<void> {
++    try {
++      await this.request(() => this.client.im.v1.messageReaction.create({
++        path: { message_id: messageId },
++        data: { reaction_type: { emoji_type: emoji } },
++      }));
++    } catch (error) {
++      // Report for diagnosis, then continue: the message still gets its answer.
++      this.report("Lark acknowledgement reaction failed");
++    }
++  }
++
+   /** Resolve directly quoted resources after authorization; one failed resource never drops the text request. */
+   async prepareMessage(message: IncomingMessage): Promise<IncomingMessage> {
+     if (!message.parentMessageId) return message;
+diff --git a/src/panes.ts b/src/panes.ts
+index b13bc13..e9fd6fb 100644
+--- a/src/panes.ts
++++ b/src/panes.ts
+@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
+ import { fileURLToPath } from "node:url";
+ import { createRequire } from "node:module";
+ import { privateDir, writePrivateJson } from "./storage.ts";
+-import type { ConversationWorker, ModelSpec, WorkerEvent, WorkerFactory, WorkerRequest, WorkerResponse } from "./types.ts";
++import type { ConversationWorker, ModelSpec, WorkerEvent, WorkerFactory, WorkerRequest, WorkerResponse, WorkerSnapshot } from "./types.ts";
+ 
+ import { closeSurface, createSurface, nameAgent } from "./herdr.ts";
+ 
+@@ -37,10 +37,19 @@ function parseRequest(message: any): WorkerRequest | undefined {
+   return ["set-target", "clear-target", "target-status"].includes(message.action)
+     ? { action: message.action } as WorkerRequest : undefined;
+ }
+-export interface PaneSnapshot { userId: string; paneId?: string; sessionFile: string; connected: boolean }
++export type PaneSnapshot = WorkerSnapshot;
+ function sessionKey(appId: string, userId: string): string {
+   return createHash("sha256").update(`${appId}\0${userId}`).digest("hex");
+ }
++/**
++ * A conversation key is a chat key plus `#N` for every conversation after the first, so a
++ * bare key stays conversation 1: the chat's original pane name and session file never move.
++ */
++export function parseConversationKey(key: string): { userId: string; slot: number } {
++  const at = key.lastIndexOf("#");
++  const slot = at > 0 ? Number(key.slice(at + 1)) : NaN;
++  return Number.isInteger(slot) && slot >= 1 ? { userId: key.slice(0, at), slot } : { userId: key, slot: 1 };
++}
+ function piCliPath(): string {
+   const candidates = new Set<string>();
+   // Pi extensions can be loaded through jiti, where import.meta.resolve is not
+@@ -93,12 +102,20 @@ class PaneWorker implements ConversationWorker {
+   private rejectReady?: (error: Error) => void;
+   private onEvent?: (event: WorkerEvent) => void;
+   private readonly deliveries = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+-  constructor(private options: HerdrWorkersOptions, private userId: string) {
+-    this.sessionFile = resolve(options.stateDir ?? join(options.cwd, ".pi", "lark-bot"), "sessions", `${sessionKey(options.appId, userId)}.jsonl`);
++  /** The chat this conversation belongs to, without its `#N` suffix. */
++  private readonly userId: string;
++  /** 1-based conversation number inside this chat. */
++  private readonly slot: number;
++  constructor(private options: HerdrWorkersOptions, private key: string) {
++    const parsed = parseConversationKey(key);
++    this.userId = parsed.userId; this.slot = parsed.slot;
++    // Slot 1 keeps the unsuffixed name so existing chats resume their remembered session.
++    const name = `${sessionKey(options.appId, this.userId)}${this.slot > 1 ? `-${this.slot}` : ""}`;
++    this.sessionFile = resolve(options.stateDir ?? join(options.cwd, ".pi", "lark-bot"), "sessions", `${name}.jsonl`);
+   }
+   /** Pane and herdr agent name; reveals no user identifier. */
+-  get name(): string { return `lark-${sessionKey(this.options.appId, this.userId).slice(0, 10)}`; }
+-  snapshot(): PaneSnapshot { return { userId: this.userId, paneId: this.paneId, sessionFile: this.sessionFile, connected: this.isConnected() }; }
++  get name(): string { return `lark-${sessionKey(this.options.appId, this.userId).slice(0, 10)}${this.slot > 1 ? `-${this.slot}` : ""}`; }
++  snapshot(): PaneSnapshot { return { key: this.key, userId: this.userId, slot: this.slot, paneId: this.paneId, sessionFile: this.sessionFile, connected: this.isConnected() }; }
+   isConnected(): boolean { return !this.closed && this.ready && !!this.socket && !this.socket.destroyed; }
+ 
+   start(): Promise<void> {
+@@ -310,25 +327,23 @@ export class HerdrWorkers implements WorkerFactory {
+     return entry.promise;
+   }
+   async reset(userId: string): Promise<void> {
+-    const entry = this.entries.get(userId);
+-    if (entry) {
+-      await entry.worker.close();
+-      await entry.promise.catch(() => {});
+-      if (this.entries.get(userId) === entry) this.entries.delete(userId);
+-    }
++    await this.closeConversation(userId);
+     const sessionFile = new PaneWorker({ ...this.options, model: this.models.get(userId) ?? this.options.model }, userId).sessionFile;
+     await rm(sessionFile, { force: true });
+     this.models.delete(userId);
+   }
++  /** Close one conversation's pane, keeping its saved Pi history so it can be resumed later. */
++  async closeConversation(userId: string): Promise<void> {
++    const entry = this.entries.get(userId);
++    if (!entry) return;
++    await entry.worker.close();
++    await entry.promise.catch(() => {});
++    if (this.entries.get(userId) === entry) this.entries.delete(userId);
++  }
+   async setModel(userId: string, model: ModelSpec): Promise<void> {
+     if (this.closed) throw new Error("HerdrWorkers is closed");
+     this.models.set(userId, model);
+-    const entry = this.entries.get(userId);
+-    if (entry) {
+-      await entry.worker.close();
+-      await entry.promise.catch(() => {});
+-      if (this.entries.get(userId) === entry) this.entries.delete(userId);
+-    }
++    await this.closeConversation(userId);
+   }
+   close(): Promise<void> {
+     if (this.closing) return this.closing;
+@@ -342,4 +357,4 @@ export class HerdrWorkers implements WorkerFactory {
+     return this.closing;
+   }
+ }
+-export const __panesTest__ = { sessionKey, piCliPath };
++export const __panesTest__ = { sessionKey, piCliPath, parseConversationKey };
+diff --git a/src/storage.ts b/src/storage.ts
+index 2878e95..fb6a9ad 100644
+--- a/src/storage.ts
++++ b/src/storage.ts
+@@ -106,6 +106,57 @@ export async function savePushTarget(stateDir: string, target: PushTarget | unde
+   else await rm(path, { force: true });
+ }
+ 
++/**
++ * One Pi session inside a chat. Conversation 1 is the chat's original session, so an
++ * existing single-conversation chat keeps working with no state file at all.
++ */
++export interface ConversationSlot { id: number; title?: string; createdAt: string; lastUsedAt: string }
++/** One chat and the conversations it has open. `active` receives that chat's next message. */
++export interface ChatConversations { active: number; next: number; slots: ConversationSlot[] }
++
++export function validateConversations(value: unknown, appId: string): Record<string, ChatConversations> {
++  const book = value as { version?: unknown; appId?: unknown; chats?: unknown } | null;
++  if (!book || book.version !== 1 || typeof book.appId !== "string" || !book.chats || typeof book.chats !== "object" || Array.isArray(book.chats)) {
++    throw new Error("Invalid conversations.json: expected version, appId and chats.");
++  }
++  // A file written for another app describes different chats: ignore it rather than fail the start.
++  if (book.appId !== appId) return {};
++  const chats: Record<string, ChatConversations> = {};
++  for (const [key, raw] of Object.entries(book.chats as Record<string, unknown>)) {
++    const chat = raw as Partial<ChatConversations> | null;
++    if (!key || !chat || !Array.isArray(chat.slots) || !Number.isInteger(chat.active) || !Number.isInteger(chat.next)) {
++      throw new Error("Invalid conversations.json: malformed chat entry.");
++    }
++    const slots = chat.slots.map((slot) => validateSlot(slot));
++    const ids = new Set(slots.map((slot) => slot.id));
++    if (!slots.length || ids.size !== slots.length || !ids.has(chat.active!)) {
++      throw new Error("Invalid conversations.json: slots must be unique and contain the active one.");
++    }
++    chats[key] = { active: chat.active!, next: Math.max(chat.next!, ...slots.map((slot) => slot.id + 1)), slots };
++  }
++  return chats;
++}
++
++function validateSlot(value: unknown): ConversationSlot {
++  const slot = value as Partial<ConversationSlot> | null;
++  if (!slot || !Number.isInteger(slot.id) || slot.id! < 1 || slot.id! > 999) throw new Error("Invalid conversations.json: bad slot id.");
++  if (slot.title !== undefined && (typeof slot.title !== "string" || slot.title.length > 80)) throw new Error("Invalid conversations.json: bad slot title.");
++  return {
++    id: slot.id!, ...(slot.title ? { title: slot.title } : {}),
++    createdAt: typeof slot.createdAt === "string" ? slot.createdAt : "",
++    lastUsedAt: typeof slot.lastUsedAt === "string" ? slot.lastUsedAt : "",
++  };
++}
++
++export async function loadConversations(stateDir: string, appId: string): Promise<Record<string, ChatConversations>> {
++  try { return validateConversations(await readPrivateJson(join(stateDir, "conversations.json")), appId); }
++  catch (error) { if (isMissing(error)) return {}; throw error; }
++}
++
++export async function saveConversations(stateDir: string, appId: string, chats: Record<string, ChatConversations>): Promise<void> {
++  await writePrivateJson(join(stateDir, "conversations.json"), { version: 1, appId, chats });
++}
++
+ /** Add ignore before any credential is created; never modify global Git configuration. */
+ export async function prepareState(cwd: string, configDirName: string): Promise<string> {
+   const parent = join(cwd, configDirName);
+diff --git a/src/types.ts b/src/types.ts
+index 1d2e251..1ffa0fb 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -70,13 +70,31 @@ export interface ConversationWorker {
+ 
+ export interface ModelSpec { provider: string; id: string }
+ 
++/**
++ * One live conversation worker, as reported to the controller's `/list` and local status view.
++ * A chat's first conversation keeps the bare chat key; later ones are `<chat key>#N`.
++ */
++export interface WorkerSnapshot {
++  /** Conversation key: the chat key, plus `#N` for every conversation after the first. */
++  key: string;
++  /** Chat key: the p2p sender's open_id, or `group:<chat_id>`. Stable across conversations. */
++  userId: string;
++  /** 1-based conversation number inside that chat. */
++  slot: number;
++  paneId?: string;
++  sessionFile: string;
++  connected: boolean;
++}
++
+ export interface WorkerFactory {
+-  list?(): Array<{ userId: string; paneId?: string; sessionFile: string; connected: boolean }>;
++  list?(): WorkerSnapshot[];
+   open(userId: string): Promise<ConversationWorker>;
+   /** Delete only this conversation's saved Pi history and close its pane. */
+   reset?(userId: string): Promise<void>;
+   /** Select the model used when this conversation's pane is next opened. */
+   setModel?(userId: string, model: ModelSpec): Promise<void>;
++  /** Close this conversation's pane but keep its saved Pi history, so it can be resumed later. */
++  closeConversation?(userId: string): Promise<void>;
+   close(): Promise<void>;
+ }
+ 
+@@ -86,6 +104,12 @@ export interface BotTransport {
+   stop(): Promise<void>;
+   send(chatId: string, text: string, replyTo?: string): Promise<string>;
+   update(messageId: string, text: string): Promise<void>;
++  /**
++   * Immediate receipt signal, added before the agent starts working.
++   * Cosmetic and best-effort: the implementation must never throw, and a missing
++   * reaction must never delay, drop or fail the message it acknowledges.
++   */
++  react?(messageId: string, emoji: string): Promise<void>;
+   /** Resolve quoted resources only after sender authorization succeeds. */
+   prepareMessage?(message: IncomingMessage): Promise<IncomingMessage>;
+   sendCard?(chatId: string, card: object, replyTo?: string): Promise<string>;
